@@ -109,3 +109,18 @@ export function roleThreadEnvironment(input: { environmentId: string | null; hos
 export function inheritedEnvironmentId(caller: { projectId: string; environmentId: string | null } | null, targetProjectId: string): string | null {
   return caller && caller.projectId === targetProjectId ? caller.environmentId : null;
 }
+
+export interface ProjectSourceShape { type: string; hostId?: string | null }
+
+/**
+ * Where a role thread runs when no environment or machine is named and the
+ * caller's environment doesn't carry over: the caller's machine when the
+ * project has a local checkout there, else the project's only machine with a
+ * local checkout. Null leaves it to bb's project default, which resolves on the
+ * bb server's machine because the plugin calls bb from there.
+ */
+export function defaultHostId(callerHostId: string | null, sources: readonly ProjectSourceShape[]): string | null {
+  const hosts = [...new Set(sources.filter((s) => s.type === "local_path" && s.hostId).map((s) => s.hostId!))];
+  if (callerHostId && hosts.includes(callerHostId)) return callerHostId;
+  return hosts.length === 1 ? hosts[0]! : null;
+}

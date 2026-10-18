@@ -23,6 +23,7 @@ import {
   RUNS_CHANGED,
   SLUG_RE,
   graphLayers,
+  defaultHostId,
   inheritedEnvironmentId,
   roleThreadEnvironment,
   validateGraph,
@@ -1096,17 +1097,23 @@ export default async function plugin(bb: BbPluginApi) {
   ) {
     if (explicit.environment && explicit.machine) throw new Error("Pass --environment or --machine, not both.");
     let projectId = explicit.project ?? ctx.projectId ?? null;
-    let caller: { projectId: string; environmentId: string | null } | null = null;
+    let caller: { projectId: string; environmentId: string | null; hostId: string | null } | null = null;
     if (ctx.threadId) {
       try {
         const t = await bb.sdk.threads.get({ threadId: ctx.threadId });
         projectId ??= t.projectId;
-        caller = { projectId: t.projectId, environmentId: t.environmentId ?? null };
+        const environmentId = t.environmentId ?? null;
+        const hostId = environmentId ? await bb.sdk.environments.get({ environmentId }).then((e) => e.hostId, () => null) : null;
+        caller = { projectId: t.projectId, environmentId, hostId };
       } catch { /* thread gone — fall through */ }
     }
     if (!projectId) throw new Error("No project: pass --project <id> or run inside a thread.");
-    const hostId = explicit.machine ? await resolveHostId(explicit.machine) : null;
+    let hostId = explicit.machine ? await resolveHostId(explicit.machine) : null;
     const environmentId = explicit.environment ?? (hostId ? null : inheritedEnvironmentId(caller, projectId));
+    if (!environmentId && !hostId) {
+      const sources = await bb.sdk.projects.get({ projectId }).then((p) => p.sources ?? [], () => []);
+      hostId = defaultHostId(caller?.hostId ?? null, sources);
+    }
     return { projectId, environmentId, hostId };
   }
 
@@ -1207,8 +1214,8 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb role sync [--json]                         reconcile roles ↔ ~/.claude/agents ↔ Tasks presets now",
     "  bb role sync --status [--json]                last sync report",
     "",
-    "A role thread inherits the calling thread's environment only within the same project. For a project whose",
-    "checkout is on another machine, pass --machine; without --machine or --environment, bb uses its project default.",
+    "Without --machine or --environment, a role thread reuses the calling thread's environment within its own project;",
+    "otherwise it runs on the caller's machine if the project has a checkout there, else on the project's only checkout.",
     "",
     "Roles can also be created and edited on the Agent roles page (sidebar); teams only there.",
   ].join("\n");
