@@ -1,7 +1,8 @@
 # Fork notes
 
 Local fork of [dmitriikapustin/bb-plugins-by-kapustin](https://github.com/dmitriikapustin/bb-plugins-by-kapustin), a monorepo of BB plugins.
-`main` is our branch. The `upstream` remote is fetch-only (push is disabled).
+`main` is our branch, pushed to `origin` ([huntsyea/bb-plugins-by-kapustin](https://github.com/huntsyea/bb-plugins-by-kapustin)).
+The `upstream` remote is fetch-only (push is disabled).
 
 - **Base:** upstream `main` at `agent-roles/v0.1.0`
 - **Installed in BB from this fork:** `plugins/agent-roles` only (`bb plugin install <path>`). The other plugins here (goals, my-tasks, role-picker, visual-workflows) still install from upstream git.
