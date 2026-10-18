@@ -12,6 +12,7 @@ Local fork of [dmitriikapustin/bb-plugins-by-kapustin](https://github.com/dmitri
 |---|---|
 | `bb role spawn --thread`, `bb role chat` and `bb role run` reuse the calling thread's environment only when it belongs to the target project. Before, a call from another project's thread failed with `409 Environment belongs to a different project`. | `contextFor` in `plugins/agent-roles/server.ts`, `inheritedEnvironmentId` in `plugins/agent-roles/shared.ts` |
 | `bb role spawn --thread` and `bb role chat` take `--machine <id-or-name>` (that machine's project checkout) or `--environment <id>`, like `bb thread spawn`. `bb role run` takes `--environment`. Without either, bb's project default applies, which resolves on the bb server. | `resolveHostId`, `targetFor` in `server.ts`, `roleThreadEnvironment` in `shared.ts` |
+| `bb role create <slug>` and `bb role update <role>` create and edit roles from the CLI, through the same validation as the Agent roles page. `--instructions-file` reads a file on the bb server's machine; `inherit` clears provider, model, reasoning or permission. Both report when instructions exceed what a role thread receives (about 3,700 characters after the role header), because bb otherwise truncates them silently. Teams are still edited only on the page, and there is no CLI delete. | `create`/`update` cases and `roleFieldsFrom`, `roomNote` in `server.ts`; `roleInstructionHead` (shared with `bb.agents.configure`) |
 
 Keep the plugin id `agent-roles`. Its roles, teams and runs live in BB's per-plugin data under that id.
 

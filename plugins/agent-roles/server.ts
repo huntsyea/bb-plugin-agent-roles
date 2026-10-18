@@ -11,6 +11,8 @@
 // use), and the skill in skills/agent-roles.
 import { randomUUID } from "node:crypto";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -786,19 +788,20 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const INSTRUCTION_BUDGET = 3900; // bb truncates configure() instructions at 4096 chars
+  const roleInstructionHead = (role: Pick<Role, "name" | "description" | "slug">, taskKey: string | null) => [
+    `# Your role: ${role.name}`,
+    role.description ? role.description : "",
+    "",
+    `Begin your first reply with this exact line so BB renders your role card: ::agent-role{slug="${role.slug}"}`,
+    taskKey ? `You are working on task ${taskKey}. Read it with \`bb tasks show ${taskKey}\`; your final answer is posted there as a comment automatically.` : "",
+    "",
+  ].join("\n");
   bb.agents.configure((ctx) => {
     const slug = typeof ctx.pluginMetadata.roleSlug === "string" ? ctx.pluginMetadata.roleSlug : roleThread(ctx.thread.id)?.role_slug;
     const role = slug ? roleBySlug(slug) : null;
     if (!role) return { tools: [], skills: ["agent-roles"] };
     const taskKey = typeof ctx.pluginMetadata.taskKey === "string" ? ctx.pluginMetadata.taskKey : roleThread(ctx.thread.id)?.task_key ?? null;
-    const head = [
-      `# Your role: ${role.name}`,
-      role.description ? role.description : "",
-      "",
-      `Begin your first reply with this exact line so BB renders your role card: ::agent-role{slug="${role.slug}"}`,
-      taskKey ? `You are working on task ${taskKey}. Read it with \`bb tasks show ${taskKey}\`; your final answer is posted there as a comment automatically.` : "",
-      "",
-    ].join("\n");
+    const head = roleInstructionHead(role, taskKey);
     let body = role.instructions;
     if (head.length + body.length > INSTRUCTION_BUDGET) {
       bb.log.warn(`role ${role.slug}: instructions exceed the ${INSTRUCTION_BUDGET}-char budget and were truncated for thread ${ctx.thread.id}`);
@@ -1187,6 +1190,11 @@ export default async function plugin(bb: BbPluginApi) {
     "Usage:",
     "  bb role list [--json]                         roles",
     "  bb role show <role>                           full instructions",
+    "  bb role create <slug> --name <n> (--instructions <text> | --instructions-file <path>) [role fields]",
+    "  bb role update <role> [--slug <s>] [--name <n>] [--instructions <text> | --instructions-file <path>] [role fields]",
+    "      role fields: [--description <d>] [--color <c>] [--provider <id>] [--model <m>] [--reasoning <level>] [--permission <mode>]",
+    "      pass inherit to --provider, --model, --reasoning or --permission to use the thread's default;",
+    "      --instructions-file reads a file on the bb server's machine, relative to your working directory",
     "  bb role spawn <role> --prompt <text> [--tasks-project <prefix>]   file a Tasks job for the role (no thread)",
     "  bb role spawn <role> --prompt <text> --thread [--parent-self | --parent <threadId>] [--project <id>] [--machine <id-or-name> | --environment <id>] [--title <t>] [--hidden] [--wait]",
     "  bb role chat <TASK-KEY> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--wait]  open a thread for a role job",
@@ -1202,7 +1210,7 @@ export default async function plugin(bb: BbPluginApi) {
     "A role thread inherits the calling thread's environment only within the same project. For a project whose",
     "checkout is on another machine, pass --machine; without --machine or --environment, bb uses its project default.",
     "",
-    "Create and edit roles/teams on the Agent roles page (sidebar).",
+    "Roles can also be created and edited on the Agent roles page (sidebar); teams only there.",
   ].join("\n");
 
   function parseFlags(argv: string[]): { positional: string[]; flags: Map<string, string | true> } {
@@ -1227,6 +1235,8 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       { name: "list", summary: "List roles", usage: "bb role list [--json]" },
       { name: "show", summary: "Show a role's instructions", usage: "bb role show <role>" },
+      { name: "create", summary: "Create a role", usage: "bb role create <slug> --name <n> (--instructions <text> | --instructions-file <path>) [--description <d>] [--color <c>] [--provider <id>] [--model <m>] [--reasoning <level>] [--permission <mode>]" },
+      { name: "update", summary: "Change a role's name, instructions, model or other fields", usage: "bb role update <role> [--slug <s>] [--name <n>] [--instructions <text> | --instructions-file <path>] [--description <d>] [--color <c>] [--provider <id|inherit>] [--model <m|inherit>] [--reasoning <level|inherit>] [--permission <mode|inherit>]" },
       { name: "spawn", summary: "File a Tasks job for a role (or --thread to start a thread now)", usage: "bb role spawn <role> --prompt <text> [--thread] [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--title <t>] [--hidden] [--wait]" },
       { name: "chat", summary: "Open a thread for a role job", usage: "bb role chat <TASK-KEY> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--wait]" },
       { name: "tasks", summary: "List open role jobs", usage: "bb role tasks [--json]" },
@@ -1246,6 +1256,31 @@ export default async function plugin(bb: BbPluginApi) {
       const fail = (message: string) => ({ exitCode: 1, stderr: message });
       const parentFor = () => (flags.has("parent-self") ? ctx.threadId ?? null : str(flags.get("parent")) ?? null);
       const targetFor = () => ({ project: str(flags.get("project")), environment: str(flags.get("environment")), machine: str(flags.get("machine")) });
+      /** Role fields named by flags. "inherit" clears provider, model, reasoning or permission. */
+      const roleFieldsFrom = async (): Promise<Record<string, unknown>> => {
+        const fields: Record<string, unknown> = {};
+        const inheritable = (v: string) => (v === "inherit" ? null : v);
+        for (const [flag, key] of [["slug", "slug"], ["name", "name"], ["description", "description"], ["color", "color"]] as const) {
+          const v = str(flags.get(flag)); if (v !== undefined) fields[key] = v;
+        }
+        for (const [flag, key] of [["provider", "providerId"], ["model", "model"], ["reasoning", "reasoningLevel"], ["permission", "permissionMode"]] as const) {
+          const v = str(flags.get(flag)); if (v !== undefined) fields[key] = inheritable(v);
+        }
+        const inline = str(flags.get("instructions"));
+        const file = str(flags.get("instructions-file"));
+        if (inline !== undefined && file !== undefined) throw new Error("Pass --instructions or --instructions-file, not both.");
+        if (inline !== undefined) fields.instructions = inline;
+        if (file !== undefined) fields.instructions = await readFile(resolvePath(ctx.cwd ?? process.cwd(), file), "utf8");
+        return fields;
+      };
+      /** Says when a thread would receive truncated instructions. */
+      const roomNote = (role: Role) => {
+        const room = INSTRUCTION_BUDGET - roleInstructionHead(role, null).length;
+        return role.instructions.length > room
+          ? `\nNote: instructions are ${role.instructions.length} characters; a role thread receives about ${room}, so the rest is cut off. Shorten them.`
+          : "";
+      };
+      const formatZod = (cause: unknown) => cause instanceof z.ZodError ? cause.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; ") : cause instanceof Error ? cause.message : String(cause);
       const formatRun = (r: TeamRunWithSteps) => {
         const lines = [`${r.id}  ${r.status.padEnd(11)} ${r.teamName}`, `  task: ${r.task.split("\n")[0]!.slice(0, 120)}`];
         if (r.error) lines.push(`  error: ${r.error}`);
@@ -1267,6 +1302,25 @@ export default async function plugin(bb: BbPluginApi) {
             const role = rest[0] ? findRole(rest[0]) : null;
             if (!role) return fail(`No role "${rest[0] ?? ""}".`);
             return reply(role, `${role.name} (${role.slug})\n${role.description}\nmodel: ${role.providerId ?? "inherit"}/${role.model ?? "inherit"} reasoning: ${role.reasoningLevel ?? "inherit"} permissions: ${role.permissionMode ?? "inherit"}\n\n${role.instructions}`);
+          }
+          case "create": {
+            const slug = rest[0];
+            if (!slug) return fail('Role slug is required, e.g. bb role create triager --name Triager --instructions-file triager.md');
+            let input;
+            try { input = roleInputSchema.parse({ slug, ...(await roleFieldsFrom()) }); } catch (cause) { return fail(formatZod(cause)); }
+            const role = createRole(input);
+            return reply(role, `Created ${role.name} (${role.slug}).${roomNote(role)}`);
+          }
+          case "update": {
+            const role = rest[0] ? findRole(rest[0]) : null;
+            if (!role) return fail(`No role "${rest[0] ?? ""}". Run "bb role list".`);
+            const fields = await roleFieldsFrom().catch((cause: unknown) => cause as Error);
+            if (fields instanceof Error) return fail(fields.message);
+            if (Object.keys(fields).length === 0) return fail("Nothing to change. Pass at least one of --slug, --name, --description, --instructions, --instructions-file, --color, --provider, --model, --reasoning, --permission.");
+            let patch;
+            try { patch = roleInputSchema.partial().parse(fields); } catch (cause) { return fail(formatZod(cause)); }
+            const updated = updateRole(role.id, Object.fromEntries(Object.entries(patch).filter(([k]) => k in fields)));
+            return reply(updated, `Updated ${updated.name} (${updated.slug}): ${Object.keys(fields).join(", ")}.${roomNote(updated)}`);
           }
           case "spawn": {
             const role = rest[0] ? findRole(rest[0]) : null;
