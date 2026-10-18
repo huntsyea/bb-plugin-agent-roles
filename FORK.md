@@ -1,7 +1,7 @@
 # Fork notes
 
 Local fork of [dmitriikapustin/bb-plugins-by-kapustin](https://github.com/dmitriikapustin/bb-plugins-by-kapustin), a monorepo of BB plugins.
-`main` is our branch, pushed to `origin` ([huntsyea/bb-plugins-by-kapustin](https://github.com/huntsyea/bb-plugins-by-kapustin)).
+`main` is our branch, pushed to `origin` ([huntsyea/bb-plugin-agent-roles](https://github.com/huntsyea/bb-plugin-agent-roles), a GitHub fork of upstream). The local folder and our fork are named for agent-roles, the only plugin we run from here.
 The `upstream` remote is fetch-only (push is disabled).
 
 - **Base:** upstream `main` at `agent-roles/v0.1.0`
