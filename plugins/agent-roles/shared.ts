@@ -91,3 +91,21 @@ export function connectGraph<T extends GraphNodeShape>(nodes: T[], next: GraphEd
   validateGraph(result);
   return result;
 }
+
+/** Where a role thread runs: the subset of the SDK's thread-spawn environment args the plugin uses. */
+export type RoleThreadEnvironment =
+  | { type: "reuse"; environmentId: string }
+  | { type: "host"; hostId: string; workspace: { type: "unmanaged"; path: null } }
+  | { type: "project-default" };
+
+/** An explicit environment wins, then an explicit machine (that machine's project checkout), then bb's project default. */
+export function roleThreadEnvironment(input: { environmentId: string | null; hostId: string | null }): RoleThreadEnvironment {
+  if (input.environmentId) return { type: "reuse", environmentId: input.environmentId };
+  if (input.hostId) return { type: "host", hostId: input.hostId, workspace: { type: "unmanaged", path: null } };
+  return { type: "project-default" };
+}
+
+/** The calling thread's environment carries over only into a thread in the same project. */
+export function inheritedEnvironmentId(caller: { projectId: string; environmentId: string | null } | null, targetProjectId: string): string | null {
+  return caller && caller.projectId === targetProjectId ? caller.environmentId : null;
+}
