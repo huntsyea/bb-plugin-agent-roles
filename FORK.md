@@ -5,7 +5,21 @@ Local fork of [dmitriikapustin/bb-plugins-by-kapustin](https://github.com/dmitri
 The `upstream` remote is fetch-only (push is disabled).
 
 - **Base:** upstream `main` at `agent-roles/v0.1.0`
-- **Installed in BB from this fork:** `plugins/agent-roles` only (`bb plugin install <path>`). The other plugins here (goals, my-tasks, role-picker, visual-workflows) still install from upstream git.
+- **Local checkout:** `/Users/huntsyea/Dev/bb-plugins/bb-plugin-agent-roles` (formerly named `kapustin`).
+- **Installed in BB from this fork (2026-10-20):** `plugins/agent-roles` only. `bb plugin list` confirms its source is `/Users/huntsyea/Dev/bb-plugins/bb-plugin-agent-roles/plugins/agent-roles`.
+- **Other installed plugins from upstream Git:** goals, role-picker, and visual-workflows. **my-tasks is not installed.**
+
+## Requirements and install notes — 2026-10-20
+
+All 13 plugin manifests require BB `>=0.43` and Plugin SDK `>=0.4.87`,
+consistent with their README requirement lines. The root manifest declares
+Node `>=22.18`; upstream READMEs specify Node 22.19+ for development, a
+stricter documented prerequisite. Keep that development prerequisite.
+
+The upstream README install examples select upstream packages. The local
+agent-roles installation uses this fork's `plugins/agent-roles` directory.
+Keep upstream README and AGENTS.md identities intact; this file records the
+fork name, origin, and local installation.
 
 ## Our changes
 
@@ -20,9 +34,15 @@ Keep the plugin id `agent-roles`. Its roles, teams and runs live in BB's per-plu
 ## Taking an upstream update
 
 ```sh
-../sync-forks.sh                 # what upstream has that we don't
-git merge agent-roles/vX.Y.Z     # upstream releases are tags prefixed by plugin
-# resolve conflicts, keeping both upstream's change and ours above
-cd plugins/agent-roles && npx tsc --noEmit && npm test
-npm run build && bb plugin reload agent-roles
+bash "/Users/huntsyea/Dev/bb-plugins/sync-forks.sh"
 ```
+
+The root [sync-forks.sh](/Users/huntsyea/Dev/bb-plugins/sync-forks.sh)
+fetches and reports upstream changes; it does not merge or deploy.
+Prepare the selected `agent-roles/vX.Y.Z` tag in an isolated `sync/<KEY>`
+worktree. Preserve the fork changes above, record the rollback commit, and
+validate `plugins/agent-roles` there. Report conflicts, results, and engine/SDK
+compatibility to Warden. Follow the
+[Warden reload protocol](/Users/huntsyea/Dev/bb-plugins/docs/agents/warden-reload-protocol.md)
+before fast-forwarding the installed checkout or reloading. Warden must obtain
+Hunter's approval and agree where agent-roles fits in the deployment order.
