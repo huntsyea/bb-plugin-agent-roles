@@ -44,6 +44,6 @@ Prepare the selected `agent-roles/vX.Y.Z` tag in an isolated `sync/<KEY>`
 worktree. Preserve the fork changes above, record the rollback commit, and
 validate `plugins/agent-roles` there. Report conflicts, results, and engine/SDK
 compatibility to Warden. Follow the
-[Warden reload protocol](/Users/huntsyea/Dev/bb-plugins/docs/agents/warden-reload-protocol.md)
+[Warden reload protocol (ADR-0001)](/Users/huntsyea/Dev/bb-plugins/docs/adr/0001-warden-reload-approval.md)
 before fast-forwarding the installed checkout or reloading. Warden must obtain
 Hunter's approval and agree where agent-roles fits in the deployment order.
