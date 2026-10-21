@@ -6,8 +6,8 @@ The `upstream` remote is fetch-only (push is disabled).
 
 - **Base:** upstream `main` at `agent-roles/v0.1.0`
 - **Local checkout:** `/Users/huntsyea/Dev/bb-plugins/bb-plugin-agent-roles` (formerly named `kapustin`).
-- **Installed in BB from this fork (2026-10-20):** `plugins/agent-roles` only. `bb plugin list` confirms its source is `/Users/huntsyea/Dev/bb-plugins/bb-plugin-agent-roles/plugins/agent-roles`.
-- **Other installed plugins from upstream Git:** goals, role-picker, and visual-workflows. **my-tasks is not installed.**
+- **Installed in BB from this fork:** `plugins/agent-roles` (2026-10-20) and `plugins/role-picker` (2026-10-20). `bb plugin list` shows both sources under `/Users/huntsyea/Dev/bb-plugins/bb-plugin-agent-roles/plugins/`.
+- **Other installed plugins from upstream Git:** goals and visual-workflows. **my-tasks is not installed.**
 
 ## Requirements and install notes — 2026-10-20
 
@@ -28,8 +28,9 @@ fork name, origin, and local installation.
 | `bb role spawn --thread`, `bb role chat` and `bb role run` reuse the calling thread's environment only when it belongs to the target project. Before, a call from another project's thread failed with `409 Environment belongs to a different project`. | `contextFor` in `plugins/agent-roles/server.ts`, `inheritedEnvironmentId` in `plugins/agent-roles/shared.ts` |
 | `bb role spawn --thread` and `bb role chat` take `--machine <id-or-name>` (that machine's project checkout) or `--environment <id>`, like `bb thread spawn`. `bb role run` takes `--environment`. Without either (and when the caller's environment doesn't carry over), the thread runs on the caller's machine if the target project has a local checkout there, else on the project's only local checkout. bb's project default, used when neither applies, resolves on the bb server's machine because the plugin calls bb from there; that's why `role spawn` 404'd where `thread spawn` (run from the caller's machine) worked. Team runs don't take `--machine` yet. | `resolveHostId`, `targetFor`, `contextFor` in `server.ts`; `roleThreadEnvironment`, `defaultHostId` in `shared.ts` |
 | `bb role create <slug>` and `bb role update <role>` create and edit roles from the CLI, through the same validation as the Agent roles page. `--instructions-file` reads a file on the bb server's machine; `inherit` clears provider, model, reasoning or permission. Both report when instructions exceed what a role thread receives (about 3,700 characters after the role header), because bb otherwise truncates them silently. Teams are still edited only on the page, and there is no CLI delete. | `create`/`update` cases and `roleFieldsFrom`, `roomNote` in `server.ts`; `roleInstructionHead` (shared with `bb.agents.configure`) |
+| Role Picker lists only Agent Roles (no `· Agent Roles` suffix). Its six local presets appear only when Agent Roles is unavailable or has no roles; `prepare` still resolves them, so a thread that already uses one keeps working (the picker shows it as "Unavailable role" until another is chosen). | `list` in `plugins/role-picker/server.ts`; test in `server.test.ts` |
 
-Keep the plugin id `agent-roles`. Its roles, teams and runs live in BB's per-plugin data under that id.
+Keep the plugin ids `agent-roles` and `role-picker`: their roles, teams, runs and thread role selections live in BB's data under those ids. Rebuild either with `bb plugin build plugins/<id>` and reload it.
 
 ## Taking an upstream update
 

@@ -18,8 +18,9 @@ export default function (bb: BbPluginApi) {
   const shared = () => bb.sdk.plugins.callRpc({ pluginId: 'agent-roles', method: 'roles_list', input: null, outputSchema: rolesOutput });
   const list = async () => {
     let imported: Role[] = [];
-    try { if (await companionAvailable()) imported = (await shared()).roles.map(r => ({ ...r, slug: 'shared:'+r.slug, name: r.name+' · Agent Roles' })); } catch { bb.log.warn('Agent Roles is unavailable; local presets remain usable.'); }
-    return { roles: [...presets, ...imported] };
+    try { if (await companionAvailable()) imported = (await shared()).roles.map(r => ({ ...r, slug: 'shared:'+r.slug })); } catch { bb.log.warn('Agent Roles is unavailable; local presets remain usable.'); }
+    // Fork: Agent Roles is the single source of roles. Local presets are listed only as a fallback; prepare still resolves them for threads that already use one.
+    return { roles: imported.length ? imported : presets };
   };
   bb.rpc.register(rpcContract, {
     roles: list,

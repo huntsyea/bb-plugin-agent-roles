@@ -66,12 +66,12 @@ test('standalone installation provides six usable roles without calling another 
   assert.equal(writes.length,1);
  } finally {await harness.dispose();}
 });
-test('companion roles coexist with local presets without replacing their identities', async () => {
+test('companion roles replace local presets in the list; existing preset threads still prepare', async () => {
  const {harness} = setup(); try {
   const list: any = await harness.callRpc('roles',null);
-  assert.equal(list.roles.length,7);
-  assert.ok(list.roles.some((r:any)=>r.slug==='local-qa'));
-  assert.ok(list.roles.some((r:any)=>r.slug==='shared:qa'));
+  assert.deepEqual(list.roles.map((r:any)=>[r.slug,r.name]),[['shared:qa','QA']]);
+  const result: any = await harness.callRpc('prepare',{threadId:null,roleSlug:'local-reviewer'});
+  assert.match(result.context,/Review for correctness/);
  } finally {await harness.dispose();}
 });
 test('an unhealthy companion does not hide the independent preset list',async()=>{
