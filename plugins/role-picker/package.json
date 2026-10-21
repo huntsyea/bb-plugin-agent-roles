@@ -78,7 +78,7 @@
   ],
   "scripts": {
     "build": "bb plugin build",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && (bb plugin types --check || echo 'SDK drift is report-only until the BBP-13 pin bump; remove this fallback when bumped.')",
     "test": "node --experimental-strip-types --test server.test.ts"
   }
 }
