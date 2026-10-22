@@ -55,7 +55,7 @@ bb plugin update agent-roles
 
 ## Requirements
 
-BB **0.43+** and Plugin SDK **0.4.87+**.
+BB **0.43+** and Plugin SDK **0.6.49+**.
 
 Running agents requires configured BB providers and uses their account quotas. Task jobs integrate with the bundled Tasks plugin. The optional [Role Picker](../role-picker/README.md) companion applies roles in the current composer.
 

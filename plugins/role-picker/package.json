@@ -4,7 +4,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.43",
-    "bbPluginSdk": ">=0.4.87"
+    "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
     "name": "Role Picker",
@@ -23,7 +23,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.87",
+    "@get-bb/plugin-sdk": "0.6.49",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
@@ -78,7 +78,7 @@
   ],
   "scripts": {
     "build": "bb plugin build",
-    "check": "tsc --noEmit && (bb plugin types --check || echo 'SDK drift is report-only until the BBP-13 pin bump; remove this fallback when bumped.')",
+    "check": "tsc --noEmit && bb plugin types --check",
     "test": "node --experimental-strip-types --test server.test.ts"
   }
 }

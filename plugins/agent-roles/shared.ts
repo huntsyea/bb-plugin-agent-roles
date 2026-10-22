@@ -12,7 +12,9 @@ export const ROLE_COLORS = [
 ] as const;
 export type RoleColor = (typeof ROLE_COLORS)[number];
 
-export const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"] as const;
+// Providers define reasoning values; keep stored values safe as command tokens.
+// Require the absolute end of input: $ alone also accepts a final newline.
+export const REASONING_VALUE_RE = /^[A-Za-z0-9._:/@+-]{1,200}$(?![\s\S])/;
 export const PERMISSION_MODES = ["accept-edits", "auto", "full"] as const;
 
 export const ROLES_CHANGED = "roles-changed";

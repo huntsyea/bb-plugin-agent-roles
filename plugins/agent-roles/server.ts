@@ -17,7 +17,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   PERMISSION_MODES,
-  REASONING_LEVELS,
+  REASONING_VALUE_RE,
   ROLE_COLORS,
   ROLES_CHANGED,
   RUNS_CHANGED,
@@ -47,6 +47,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const slugSchema = z.string().regex(SLUG_RE, "lowercase letters, digits and dashes; max 40");
+const reasoningValueSchema = z.string().regex(REASONING_VALUE_RE, "Use 1–200 letters, digits, or . _ : / @ + -");
 
 const roleSchema = z.object({
   id: z.string(),
@@ -56,7 +57,7 @@ const roleSchema = z.object({
   instructions: z.string(),
   providerId: z.string().nullable(),
   model: z.string().nullable(),
-  reasoningLevel: z.enum(REASONING_LEVELS).nullable(),
+  reasoningLevel: reasoningValueSchema.nullable(),
   permissionMode: z.enum(PERMISSION_MODES).nullable(),
   color: z.enum(ROLE_COLORS),
   sortOrder: z.number().int(),
@@ -73,7 +74,7 @@ const roleInputSchema = z
     instructions: z.string().trim().min(1).max(20_000),
     providerId: z.string().min(1).nullable().default(null),
     model: z.string().min(1).nullable().default(null),
-    reasoningLevel: z.enum(REASONING_LEVELS).nullable().default(null),
+    reasoningLevel: reasoningValueSchema.nullable().default(null),
     permissionMode: z.enum(PERMISSION_MODES).nullable().default(null),
     color: z.enum(ROLE_COLORS).default("gray"),
   })

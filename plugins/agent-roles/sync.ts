@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { existsSync, promises as fs, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PERMISSION_MODES, REASONING_LEVELS, ROLE_COLORS, SLUG_RE, type RoleColor } from "./shared";
+import { PERMISSION_MODES, REASONING_VALUE_RE, ROLE_COLORS, SLUG_RE, type RoleColor } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Canonical record shared by the three sides
@@ -151,7 +151,7 @@ export function parseAgentFile(slug: string, text: string, mtimeMs: number): Age
       instructions: fm[2]!.trim(),
       providerId,
       model,
-      reasoningLevel: (REASONING_LEVELS as readonly string[]).includes(reasoning) ? reasoning : null,
+      reasoningLevel: REASONING_VALUE_RE.test(reasoning) ? reasoning : null,
       permissionMode: (PERMISSION_MODES as readonly string[]).includes(permission) ? permission : null,
       color: (ROLE_COLORS as readonly string[]).includes(color) ? (color as RoleColor) : "gray",
     },
