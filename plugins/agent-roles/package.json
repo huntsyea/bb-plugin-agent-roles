@@ -4,7 +4,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.43",
-    "bbPluginSdk": ">=0.6.49"
+    "bbPluginSdk": ">=0.6.79"
   },
   "bb": {
     "name": "Agent Roles",
@@ -25,7 +25,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.6.49",
+    "@get-bb/plugin-sdk": "0.6.79",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",

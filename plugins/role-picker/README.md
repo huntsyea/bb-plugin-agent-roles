@@ -61,7 +61,7 @@ bb plugin update role-picker
 
 ## Requirements
 
-BB **0.43+** and Plugin SDK **0.6.49+**.
+BB **0.43+** and Plugin SDK **0.6.79+**.
 
 Works independently. The optional **Agent Roles** companion adds custom specialists; it is not required. Each provider uses your existing account and quota.
 
