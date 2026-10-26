@@ -194,3 +194,77 @@ test('opening a role job from the page places its thread by the same rule', asyn
     assert.deepEqual(tasks.comments, [{ key: job.key, body: `**Reviewer** (thread ${threadId}):\n\nLooks good.` }]);
   } finally { await host.harness.dispose(); }
 });
+
+// A thread's role (BBP-46, BBP-60). Role Picker writes this plugin's thread
+// metadata; the badge, the injected instructions and job reports must agree.
+function roleHost() {
+  const metadata = new Map<string, Record<string, unknown>>();
+  const spawns: Array<Record<string, any>> = [];
+  const host = createFakePluginHost({ pluginId: 'agent-roles', settings: { syncEnabled: false }, agentSkillIds: ['agent-roles'],
+    sdk: { threads: {
+      spawn: (args: any) => { spawns.push(args); const id = `thread-${spawns.length}`; metadata.set(id, { ...args.pluginMetadata }); return { id }; },
+      getPluginMetadata: ({ threadId }: any) => metadata.get(threadId) ?? {},
+    } } as any,
+  });
+  /** What Role Picker's prepare writes into this plugin's metadata (a merge). */
+  const pick = (threadId: string, set: Record<string, string>) => metadata.set(threadId, { ...metadata.get(threadId), ...set });
+  const configure = (threadId: string) => host.harness.resolveAgentConfiguration({
+    pluginMetadata: metadata.get(threadId) ?? {}, thread: { id: threadId, title: null, parentThreadId: null, sourceThreadId: null },
+    project: { id: 'project-test', kind: 'standard', name: 'Test', gitRemoteUrl: null }, environment: { id: 'env', name: null, path: null },
+  } as any);
+  return { host, spawns, pick, configure };
+}
+
+test('after Role Picker changes or clears a spawned thread\'s role, the badge shows what the thread is told', async () => {
+  const { host, pick, configure } = roleHost();
+  try {
+    await plugin(host.bb);
+    const { roles }: any = await host.harness.callRpc('roles_list', null);
+    const analyst = roles.find((r: any) => r.slug === 'analyst');
+    const spawned = await host.harness.runCli(['spawn', 'reviewer', '--prompt', 'Review', '--thread', '--project', 'project-test']);
+    assert.equal(spawned.exitCode, 0, spawned.stderr);
+    pick('thread-1', { roleId: analyst.id, roleSlug: 'analyst', roleName: 'Analyst', roleColor: analyst.color });
+    assert.match((await configure('thread-1')).instructions ?? '', /# Your role: Analyst/);
+    assert.equal(((await host.harness.callRpc('thread_role', { threadId: 'thread-1' })) as any)?.roleSlug, 'analyst');
+    pick('thread-1', { roleId: '', roleSlug: '', roleName: '', roleColor: '' });
+    assert.equal((await configure('thread-1')).instructions, null);
+    assert.equal(await host.harness.callRpc('thread_role', { threadId: 'thread-1' }), null);
+  } finally { await host.harness.dispose(); }
+});
+
+test('a job report names the role the thread has now', async () => {
+  const { host, pick } = roleHost();
+  const tasks = memoryTasks();
+  try {
+    await agentRoles(host.bb, { tasksRunner: tasks.run });
+    await tasks.run(['create', '--project', 'AG', '--title', '[Reviewer] Review', '--description', 'Review', '--label', 'role:reviewer']);
+    const spawned = await host.harness.runCli(['spawn', 'reviewer', '--prompt', 'Review', '--thread', '--task', 'AG-1', '--project', 'project-test']);
+    assert.equal(spawned.exitCode, 0, spawned.stderr);
+    pick('thread-1', { roleId: 'x', roleSlug: 'analyst', roleName: 'Analyst', roleColor: 'blue' });
+    await host.harness.emitThreadEvent('thread.idle', { thread: { id: 'thread-1' }, lastAssistantText: 'Planned.' } as any);
+    pick('thread-1', { roleId: '', roleSlug: '', roleName: '', roleColor: '' });
+    await host.harness.emitThreadEvent('thread.idle', { thread: { id: 'thread-1' }, lastAssistantText: 'Done.' } as any);
+    assert.deepEqual(tasks.comments.map((c) => c.body), ['**Analyst** (thread thread-1):\n\nPlanned.', '**Agent** (thread thread-1):\n\nDone.']);
+  } finally { await host.harness.dispose(); }
+});
+
+test('the CLI warns about cut-off instructions exactly when a role thread receives them cut off', async () => {
+  const { host, configure } = roleHost();
+  const { roleBriefing } = await import('./thread-role.ts');
+  try {
+    await plugin(host.bb);
+    const base = { slug: 'budget', name: 'Budget', description: 'Fills the room.' };
+    const { room } = roleBriefing({ ...base, slug: `${base.slug}-0`, instructions: '' }, null); // every slug below is as long
+    for (const [i, length] of [room - 1, room, room + 1, room + 500].entries()) {
+      const slug = `${base.slug}-${i}`;
+      const created = await host.harness.runCli(['create', slug, '--name', base.name, '--description', base.description, '--instructions', 'x'.repeat(length)]);
+      assert.equal(created.exitCode, 0, created.stderr);
+      const spawned = await host.harness.runCli(['spawn', slug, '--prompt', 'Go', '--thread', '--project', 'project-test']);
+      assert.equal(spawned.exitCode, 0, spawned.stderr);
+      const threadId = spawned.stdout!.match(/thread (thread-\d+)/)![1]!;
+      const injected = (await configure(threadId)).instructions ?? '';
+      assert.equal(injected.endsWith('[…truncated]'), length > room, `length ${length}`);
+      assert.equal(/cut off/.test(created.stdout!), injected.endsWith('[…truncated]'), `length ${length}`);
+    }
+  } finally { await host.harness.dispose(); }
+});

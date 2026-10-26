@@ -32,9 +32,9 @@ export interface RoleJobsDeps {
   roles: { find(ref: string): { slug: string; name: string } | null; list(): Array<{ slug: string; name: string }> };
   /** Spawn the role thread (server.ts spawnRole); it records the thread with its task key. */
   spawn(input: { roleSlug: string; prompt: string; projectId: string; placement: PlacementRequest; parentThreadId: string | null; hidden: false; taskKey: string }): Promise<string>;
-  /** Role threads this plugin spawned (the role_threads table). */
+  /** Role threads this plugin spawned (the role_threads table), with their current role and task (thread-role.ts). */
   threads: {
-    get(threadId: string): { roleSlug: string; taskKey: string | null; lastReportHash: string | null } | null;
+    get(threadId: string): Promise<{ roleName: string | null; taskKey: string | null; lastReportHash: string | null } | null>;
     forTask(taskKey: string): string[];
     setReportHash(threadId: string, hash: string): void;
   };
@@ -121,7 +121,7 @@ export function makeRoleJobs(deps: RoleJobsDeps) {
 
     /** Post a role thread's latest answer to its job as one comment; the same answer is posted once. */
     async report(threadId: string, answer: string): Promise<void> {
-      const row = deps.threads.get(threadId);
+      const row = await deps.threads.get(threadId);
       if (!row?.taskKey) return;
       const text = answer.replace(/^::agent-role\{[^}]*\}\s*$/m, "").trim();
       if (!text) return;
@@ -129,7 +129,7 @@ export function makeRoleJobs(deps: RoleJobsDeps) {
       if (row.lastReportHash === hash) return;
       try {
         const body = text.length > 6000 ? text.slice(0, 6000) + "\n\n[…truncated; full answer in the thread]" : text;
-        await run(["comment", row.taskKey, "--body", `**${deps.roles.find(row.roleSlug)?.name ?? row.roleSlug}** (thread ${threadId}):\n\n${body}`]);
+        await run(["comment", row.taskKey, "--body", `**${row.roleName ?? "Agent"}** (thread ${threadId}):\n\n${body}`]);
         deps.threads.setReportHash(threadId, hash);
       } catch (cause) {
         deps.log.warn(`report to ${row.taskKey}: ${message(cause)}`);

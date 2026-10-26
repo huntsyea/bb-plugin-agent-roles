@@ -37,6 +37,7 @@ import {
 import { makePlacement, type PlacementRequest } from "./placement";
 import { makeRoleJobs } from "./role-jobs";
 import { makeBbTasksRunner, type BbTasksRunner } from "./tasks-cli";
+import { INSTRUCTION_BUDGET, makeThreadRoles, roleBriefing, roleMetadata } from "./thread-role";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -797,34 +798,26 @@ export async function agentRoles(bb: BbPluginApi, options: { tasksRunner?: BbTas
       ...(role.permissionMode ? { permissionMode: role.permissionMode } : {}),
       ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
       ...(input.hidden ? { visibility: "hidden" } : {}),
-      pluginMetadata: { roleId: role.id, roleSlug: role.slug, roleName: role.name, roleColor: role.color, taskKey: input.taskKey },
+      pluginMetadata: roleMetadata(role, input.taskKey),
     } as unknown as Parameters<typeof bb.sdk.threads.spawn>[0];
     const thread = await bb.sdk.threads.spawn(args);
     threadStmts.insert.run(thread.id, role.slug, input.taskKey, Date.now());
     return thread.id;
   }
 
-  const INSTRUCTION_BUDGET = 3900; // bb truncates configure() instructions at 4096 chars
-  const roleInstructionHead = (role: Pick<Role, "name" | "description" | "slug">, taskKey: string | null) => [
-    `# Your role: ${role.name}`,
-    role.description ? role.description : "",
-    "",
-    `Begin your first reply with this exact line so BB renders your role card: ::agent-role{slug="${role.slug}"}`,
-    taskKey ? `You are working on task ${taskKey}. Read it with \`bb tasks show ${taskKey}\`; your final answer is posted there as a comment automatically.` : "",
-    "",
-  ].join("\n");
+  // Which role a thread has: its metadata (Role Picker changes and clears it
+  // there), else the role it was spawned with. See thread-role.ts.
+  const threadRoles = makeThreadRoles({
+    roleBySlug,
+    spawned: (threadId) => { const row = roleThread(threadId); return row ? { roleSlug: row.role_slug, taskKey: row.task_key } : null; },
+    metadata: (threadId) => bb.sdk.threads.getPluginMetadata({ threadId }),
+  });
   bb.agents.configure((ctx) => {
-    const slug = typeof ctx.pluginMetadata.roleSlug === "string" ? ctx.pluginMetadata.roleSlug : roleThread(ctx.thread.id)?.role_slug;
-    const role = slug ? roleBySlug(slug) : null;
+    const { role, taskKey } = threadRoles.resolve(ctx.thread.id, ctx.pluginMetadata);
     if (!role) return { tools: [], skills: ["agent-roles"] };
-    const taskKey = typeof ctx.pluginMetadata.taskKey === "string" ? ctx.pluginMetadata.taskKey : roleThread(ctx.thread.id)?.task_key ?? null;
-    const head = roleInstructionHead(role, taskKey);
-    let body = role.instructions;
-    if (head.length + body.length > INSTRUCTION_BUDGET) {
-      bb.log.warn(`role ${role.slug}: instructions exceed the ${INSTRUCTION_BUDGET}-char budget and were truncated for thread ${ctx.thread.id}`);
-      body = body.slice(0, INSTRUCTION_BUDGET - head.length - 20) + "\n[…truncated]";
-    }
-    return { tools: [], skills: ["agent-roles"], instructions: head + body };
+    const briefing = roleBriefing(role, taskKey);
+    if (briefing.truncated) bb.log.warn(`role ${role.slug}: instructions exceed the ${INSTRUCTION_BUDGET}-char budget and were truncated for thread ${ctx.thread.id}`);
+    return { tools: [], skills: ["agent-roles"], instructions: briefing.text };
   });
 
   // ------------------------------------------------------------------ role jobs in Tasks
@@ -836,9 +829,11 @@ export async function agentRoles(bb: BbPluginApi, options: { tasksRunner?: BbTas
     roles: { find: findRole, list: listRoles },
     spawn: spawnRole,
     threads: {
-      get: (threadId) => {
+      get: async (threadId) => {
         const row = roleThread(threadId);
-        return row ? { roleSlug: row.role_slug, taskKey: row.task_key, lastReportHash: row.last_report_hash } : null;
+        if (!row) return null;
+        const { role, taskKey } = await threadRoles.lookup(threadId);
+        return { roleName: role?.name ?? null, taskKey, lastReportHash: row.last_report_hash };
       },
       forTask: (taskKey) => (threadStmts.forTask.all(taskKey) as Array<{ thread_id: string }>).map((r) => r.thread_id),
       setReportHash: (threadId, hash) => { threadStmts.setReport.run(hash, threadId); },
@@ -1094,18 +1089,8 @@ export async function agentRoles(bb: BbPluginApi, options: { tasksRunner?: BbTas
       ({ threadId: await roleJobs.open({ ...rest, placement: placementOf({ environmentId, hostId, callerThreadId }) }) }),
     role_tasks_list: () => roleJobs.list(),
     thread_role: async ({ threadId }) => {
-      let slug: string | null = roleThread(threadId)?.role_slug ?? null;
-      let taskKey: string | null = roleThread(threadId)?.task_key ?? null;
-      if (!slug) {
-        try {
-          const meta = (await bb.sdk.threads.getPluginMetadata({ threadId })) as Record<string, unknown>;
-          if (typeof meta.roleSlug === "string") slug = meta.roleSlug;
-          if (typeof meta.taskKey === "string") taskKey = meta.taskKey;
-        } catch { /* not a role thread */ }
-      }
-      const role = slug ? roleBySlug(slug) : null;
-      if (!role) return null;
-      return { roleSlug: role.slug, roleName: role.name, description: role.description, color: role.color, instructions: role.instructions, taskKey };
+      const { role, taskKey } = await threadRoles.lookup(threadId);
+      return role ? { roleSlug: role.slug, roleName: role.name, description: role.description, color: role.color, instructions: role.instructions, taskKey } : null;
     },
     sync_run: () => syncNow(),
     sync_status: async () => {
@@ -1218,8 +1203,8 @@ export async function agentRoles(bb: BbPluginApi, options: { tasksRunner?: BbTas
       };
       /** Says when a thread would receive truncated instructions. */
       const roomNote = (role: Role) => {
-        const room = INSTRUCTION_BUDGET - roleInstructionHead(role, null).length;
-        return role.instructions.length > room
+        const { truncated, room } = roleBriefing(role, null);
+        return truncated
           ? `\nNote: instructions are ${role.instructions.length} characters; a role thread receives about ${room}, so the rest is cut off. Shorten them.`
           : "";
       };

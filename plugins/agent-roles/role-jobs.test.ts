@@ -27,7 +27,10 @@ function jobsWith(tasks = memoryTasks(), configuredProject = '') {
       return threadId;
     },
     threads: {
-      get: (threadId: string) => threads.get(threadId) ?? null,
+      get: async (threadId: string) => {
+        const t = threads.get(threadId);
+        return t ? { roleName: ROLES.find((r) => r.slug === t.roleSlug)?.name ?? null, taskKey: t.taskKey, lastReportHash: t.lastReportHash } : null;
+      },
       forTask: (key: string) => [...threads].filter(([, t]) => t.taskKey === key).map(([id]) => id),
       setReportHash: (threadId: string, hash: string) => { threads.get(threadId)!.lastReportHash = hash; },
     },

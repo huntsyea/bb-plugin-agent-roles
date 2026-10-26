@@ -1,6 +1,8 @@
 import { defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { presets } from './presets.ts';
+// Fork (BBP-60): Agent Roles owns its thread metadata; read and write it through its module.
+import { metadataRoleSlug, roleMetadata } from '../agent-roles/thread-role.ts';
 const role = z.object({ id: z.string(), slug: z.string(), name: z.string(), description: z.string(), instructions: z.string(), color: z.string() });
 const rolesOutput = z.object({ roles: z.array(role) });
 const metadata = z.object({ roleId: z.string(), roleSlug: z.string(), roleName: z.string(), roleColor: z.string() });
@@ -25,11 +27,11 @@ export default function (bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     roles: list,
     current: async ({ threadId }) => {
-      const own = await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: bb.pluginId });
-      if (typeof own.roleSlug === 'string') return { roleSlug: own.roleSlug || null };
+      const own = metadataRoleSlug(await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: bb.pluginId }));
+      if (own !== undefined) return { roleSlug: own || null };
       if (!await companionAvailable()) return { roleSlug: null };
-      const meta = await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: 'agent-roles' });
-      if (typeof meta.roleSlug === 'string') return { roleSlug: meta.roleSlug ? `shared:${meta.roleSlug}` : null };
+      const shared = metadataRoleSlug(await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: 'agent-roles' }));
+      if (shared !== undefined) return { roleSlug: shared ? `shared:${shared}` : null };
       const legacy = await bb.sdk.plugins.callRpc({ pluginId: 'agent-roles', method: 'thread_role', input: { threadId }, outputSchema: z.object({ roleSlug: z.string() }).nullable() });
       return { roleSlug: legacy ? `shared:${legacy.roleSlug}` : null };
     },
@@ -39,11 +41,9 @@ export default function (bb: BbPluginApi) {
       const sharedSlug = roleSlug?.startsWith('shared:') ? roleSlug.slice(7) : null;
       const selected = local ?? (sharedSlug && available ? (await shared()).roles.find(r => r.slug === sharedSlug) : null);
       if (roleSlug && !selected) throw new Error('This role is unavailable. Enable its source or choose a built-in role.');
-      const meta = { roleId: selected?.id ?? '', roleSlug: roleSlug ?? '', roleName: selected?.name ?? '', roleColor: selected?.color ?? '' };
+      const meta = roleMetadata(selected && roleSlug ? { ...selected, slug: roleSlug } : null);
       if (threadId) {
-        if (available) await bb.sdk.threads.updatePluginMetadata({ threadId, pluginId: 'agent-roles', set: {
-          roleId: sharedSlug ? meta.roleId : '', roleSlug: sharedSlug ?? '', roleName: sharedSlug ? meta.roleName : '', roleColor: sharedSlug ? meta.roleColor : '',
-        } });
+        if (available) await bb.sdk.threads.updatePluginMetadata({ threadId, pluginId: 'agent-roles', set: roleMetadata(selected && sharedSlug ? { ...selected, slug: sharedSlug } : null) });
         await bb.sdk.threads.updatePluginMetadata({ threadId, pluginId: bb.pluginId, set: meta });
       }
       return { metadata: meta, context: selected
