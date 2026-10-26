@@ -45,30 +45,3 @@ test('invalid reconnect is atomic, existing destination connection is deduplicat
   assert.deepEqual(duplicate[1]!.inputs, []);
   assert.deepEqual(duplicate[2]!.inputs, ['a']);
 });
-
-test('role threads inherit the caller environment only within its own project', async () => {
-  const { inheritedEnvironmentId } = await import('./shared.ts');
-  const caller = { projectId: 'proj_personal', environmentId: 'env_caller' };
-  assert.equal(inheritedEnvironmentId(caller, 'proj_personal'), 'env_caller');
-  assert.equal(inheritedEnvironmentId(caller, 'proj_other'), null);
-  assert.equal(inheritedEnvironmentId(null, 'proj_other'), null);
-});
-
-test('an explicit environment wins over a machine, and a machine selects its project checkout', async () => {
-  const { roleThreadEnvironment } = await import('./shared.ts');
-  assert.deepEqual(roleThreadEnvironment({ environmentId: 'env_1', hostId: 'host_1' }), { type: 'reuse', environmentId: 'env_1' });
-  assert.deepEqual(roleThreadEnvironment({ environmentId: null, hostId: 'host_1' }), { type: 'host', hostId: 'host_1', workspace: { type: 'unmanaged', path: null } });
-  assert.deepEqual(roleThreadEnvironment({ environmentId: null, hostId: null }), { type: 'project-default' });
-});
-
-test('a cross-project role thread runs on the caller machine when the project has a checkout there, else on its only checkout', async () => {
-  const { defaultHostId } = await import('./shared.ts');
-  const mac = { type: 'local_path', hostId: 'host_mac' };
-  const mini = { type: 'local_path', hostId: 'host_mini' };
-  assert.equal(defaultHostId('host_mini', [mac, mini]), 'host_mini');
-  assert.equal(defaultHostId('host_mac', [mini]), 'host_mini');
-  assert.equal(defaultHostId(null, [mini]), 'host_mini');
-  assert.equal(defaultHostId('host_g5', [mac, mini]), null);
-  assert.equal(defaultHostId('host_mini', [{ type: 'git', hostId: 'host_mini' }]), null);
-  assert.equal(defaultHostId('host_mini', []), null);
-});

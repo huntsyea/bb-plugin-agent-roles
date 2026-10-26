@@ -287,7 +287,7 @@ function SpawnBox({ role, onClose, onFiled }: { role: Role; onClose: () => void;
     onClose();
   });
   const chatNow = () => run(async () => {
-    const { threadId } = await rpc.call("role_spawn", { roleSlug: role.slug, prompt: prompt.trim(), projectId, environmentId: null, parentThreadId: ctx.threadId, hidden: false, taskKey: null });
+    const { threadId } = await rpc.call("role_spawn", { roleSlug: role.slug, prompt: prompt.trim(), projectId, environmentId: null, callerThreadId: ctx.threadId, parentThreadId: ctx.threadId, hidden: false, taskKey: null });
     onClose();
     navigate.toThread(threadId);
   });
@@ -368,7 +368,7 @@ function RoleJobs({ roles, refreshKey }: { roles: Role[]; refreshKey: number }) 
   const chat = (t: RoleTask) => run(async () => {
     const projectId = ctx.projectId ?? "";
     if (!projectId) throw new Error("Open a project first");
-    const { threadId } = await rpc.call("role_chat", { taskKey: t.key, projectId, environmentId: null, parentThreadId: ctx.threadId });
+    const { threadId } = await rpc.call("role_chat", { taskKey: t.key, projectId, environmentId: null, callerThreadId: ctx.threadId, parentThreadId: ctx.threadId });
     refetch();
     navigate.toThread(threadId);
   });
@@ -766,7 +766,7 @@ function RunBox({ team, onStarted, onClose }: { team: Team; onStarted: (run: Tea
       onSubmit={(e) => {
         e.preventDefault();
         void run(async () => {
-          const r = await rpc.call("runs_start", { teamSlug: team.slug, task: task.trim(), projectId, environmentId: null, parentThreadId: ctx.threadId, hidden });
+          const r = await rpc.call("runs_start", { teamSlug: team.slug, task: task.trim(), projectId, environmentId: null, callerThreadId: ctx.threadId, parentThreadId: ctx.threadId, hidden });
           onStarted(r);
         }, "Team run started");
       }}>

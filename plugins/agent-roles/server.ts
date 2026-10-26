@@ -23,9 +23,6 @@ import {
   RUNS_CHANGED,
   SLUG_RE,
   graphLayers,
-  defaultHostId,
-  inheritedEnvironmentId,
-  roleThreadEnvironment,
   validateGraph,
   type RoleColor,
 } from "./shared";
@@ -41,6 +38,7 @@ import {
   type SyncState,
   type TaskRecord,
 } from "./sync";
+import { makePlacement, type PlacementRequest } from "./placement";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -183,8 +181,10 @@ const spawnInputSchema = z
     prompt: z.string().trim().min(1).max(50_000),
     projectId: z.string().min(1),
     environmentId: z.string().min(1).nullable().default(null),
-    /** Machine whose project checkout the thread runs in; ignored when environmentId is set. */
+    /** Machine whose project checkout the thread runs in; can't be combined with environmentId. */
     hostId: z.string().min(1).nullable().default(null),
+    /** The thread the request came from; see placement.ts. */
+    callerThreadId: z.string().min(1).nullable().default(null),
     parentThreadId: z.string().min(1).nullable().default(null),
     title: z.string().trim().min(1).max(120).optional(),
     hidden: z.boolean().default(false),
@@ -220,6 +220,10 @@ const startRunInputSchema = z
     task: z.string().trim().min(1).max(50_000),
     projectId: z.string().min(1),
     environmentId: z.string().min(1).nullable().default(null),
+    /** Machine every step runs on; can't be combined with environmentId. */
+    hostId: z.string().min(1).nullable().default(null),
+    /** The thread the request came from; see placement.ts. */
+    callerThreadId: z.string().min(1).nullable().default(null),
     parentThreadId: z.string().min(1).nullable().default(null),
     hidden: z.boolean().default(false),
   })
@@ -276,6 +280,8 @@ export const rpcContract = defineRpcContract({
       taskKey: z.string().min(1),
       projectId: z.string().min(1),
       environmentId: z.string().min(1).nullable().default(null),
+      hostId: z.string().min(1).nullable().default(null),
+      callerThreadId: z.string().min(1).nullable().default(null),
       parentThreadId: z.string().min(1).nullable().default(null),
     }).strict(),
     output: z.object({ threadId: z.string() }).strict(),
@@ -765,7 +771,12 @@ export default async function plugin(bb: BbPluginApi) {
   interface RoleThreadRow { thread_id: string; role_slug: string; task_key: string | null; last_report_hash: string | null; created_at: number }
   const roleThread = (threadId: string) => threadStmts.get.get(threadId) as RoleThreadRow | undefined;
 
-  async function spawnRole(input: z.infer<typeof spawnInputSchema>): Promise<string> {
+  const place = makePlacement(bb.sdk);
+  type SpawnInput = Omit<z.infer<typeof spawnInputSchema>, "environmentId" | "hostId" | "callerThreadId"> & { placement: PlacementRequest };
+  const placementOf = (input: { environmentId: string | null; hostId?: string | null; callerThreadId?: string | null }): PlacementRequest =>
+    ({ callerThreadId: input.callerThreadId ?? null, environmentId: input.environmentId, machine: input.hostId ?? null });
+
+  async function spawnRole(input: SpawnInput): Promise<string> {
     const role = findRole(input.roleSlug);
     if (!role) throw new Error(`No role "${input.roleSlug}". Run "bb role list".`);
     const title = input.title ?? `[${role.name}] ${input.taskKey ? input.taskKey + " · " : ""}${input.prompt.split("\n")[0]!.slice(0, 80)}`;
@@ -775,7 +786,7 @@ export default async function plugin(bb: BbPluginApi) {
         : {};
     const args = {
       projectId: input.projectId,
-      environment: roleThreadEnvironment({ environmentId: input.environmentId, hostId: input.hostId }),
+      environment: await place(input.projectId, input.placement),
       prompt: input.prompt,
       title,
       ...tuple,
@@ -843,13 +854,13 @@ export default async function plugin(bb: BbPluginApi) {
     labels.map((l) => l.name).find((n) => n.startsWith(ROLE_LABEL_PREFIX))?.slice(ROLE_LABEL_PREFIX.length) ?? null;
 
   /** Open a thread for a task's role, attach it and mark the task in progress. */
-  async function chatRoleTask(input: { taskKey: string; projectId: string; environmentId: string | null; hostId?: string | null; parentThreadId: string | null }): Promise<string> {
+  async function chatRoleTask(input: { taskKey: string; projectId: string; placement: PlacementRequest; parentThreadId: string | null }): Promise<string> {
     const ops = await taskOps();
     const detail = await ops.show(input.taskKey);
     const slug = roleSlugOfTask(detail.labels ?? []);
     if (!slug) throw new Error(`Task ${input.taskKey} has no role label (${ROLE_LABEL_PREFIX}<slug>).`);
     const prompt = detail.task.description?.trim() || detail.task.title;
-    const threadId = await spawnRole({ roleSlug: slug, prompt, projectId: input.projectId, environmentId: input.environmentId, hostId: input.hostId ?? null, parentThreadId: input.parentThreadId, hidden: false, taskKey: detail.task.key });
+    const threadId = await spawnRole({ roleSlug: slug, prompt, projectId: input.projectId, placement: input.placement, parentThreadId: input.parentThreadId, hidden: false, taskKey: detail.task.key });
     try { await ops.attach(detail.task.key, threadId); } catch (cause) { bb.log.warn(`attach ${detail.task.key}: ${cause instanceof Error ? cause.message : String(cause)}`); }
     if (detail.task.status === "backlog" || detail.task.status === "todo") {
       try { await ops.setStatus(detail.task.key, "in_progress"); } catch { /* status is cosmetic */ }
@@ -977,7 +988,7 @@ export default async function plugin(bb: BbPluginApi) {
     throw new Error("cancelled");
   }
 
-  async function executeRun(run: TeamRun, team: Team, hidden: boolean): Promise<void> {
+  async function executeRun(run: TeamRun, team: Team, hidden: boolean, placement: PlacementRequest): Promise<void> {
     const controller = new AbortController();
     controllers.set(run.id, controller);
     const { signal } = controller;
@@ -1013,7 +1024,7 @@ export default async function plugin(bb: BbPluginApi) {
           byNode: new Map(done.map((id) => [id, outputs.get(id)!] as const)),
         });
         const threadId = await spawnRole({
-          roleSlug: role.slug, prompt, projectId: run.projectId, environmentId: run.environmentId, hostId: null,
+          roleSlug: role.slug, prompt, projectId: run.projectId, placement,
           parentThreadId: run.parentThreadId, hidden, taskKey: null,
           title: `[${role.name}] ${team.name} · ${node.label}`,
         });
@@ -1059,10 +1070,12 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  function startRun(input: z.infer<typeof startRunInputSchema>): TeamRun {
+  async function startRun(input: Omit<z.infer<typeof startRunInputSchema>, "hostId" | "callerThreadId"> & { placement: PlacementRequest }): Promise<TeamRun> {
     const team = findTeam(input.teamSlug);
     if (!team) throw new Error(`No team "${input.teamSlug}". Run "bb role teams".`);
     assertGraph(team.nodes);
+    // Fail before the run exists on a bad machine or environment; each step resolves the same request.
+    await place(input.projectId, input.placement);
     const layers = graphLayers(team.nodes);
     const id = newId("trun");
     const now = Date.now();
@@ -1075,7 +1088,7 @@ export default async function plugin(bb: BbPluginApi) {
     })();
     const run = toRun(runStmts.get.get(id) as RunRow);
     publishRuns();
-    void executeRun(run, team, input.hidden);
+    void executeRun(run, team, input.hidden, input.placement);
     return run;
   }
 
@@ -1091,42 +1104,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Resolve project + environment for a CLI call from the invoking thread. */
-  async function contextFor(
-    ctx: { threadId?: string; projectId?: string },
-    explicit: { project?: string; environment?: string; machine?: string } = {},
-  ) {
-    if (explicit.environment && explicit.machine) throw new Error("Pass --environment or --machine, not both.");
-    let projectId = explicit.project ?? ctx.projectId ?? null;
-    let caller: { projectId: string; environmentId: string | null; hostId: string | null } | null = null;
-    if (ctx.threadId) {
-      try {
-        const t = await bb.sdk.threads.get({ threadId: ctx.threadId });
-        projectId ??= t.projectId;
-        const environmentId = t.environmentId ?? null;
-        const hostId = environmentId ? await bb.sdk.environments.get({ environmentId }).then((e) => e.hostId, () => null) : null;
-        caller = { projectId: t.projectId, environmentId, hostId };
-      } catch { /* thread gone — fall through */ }
+  /** The project a CLI call targets: --project, else the invoking thread's project. */
+  async function projectFor(ctx: { threadId?: string; projectId?: string }, explicit?: string): Promise<string> {
+    let projectId = explicit ?? ctx.projectId ?? null;
+    if (!projectId && ctx.threadId) {
+      try { projectId = (await bb.sdk.threads.get({ threadId: ctx.threadId })).projectId; } catch { /* thread gone */ }
     }
     if (!projectId) throw new Error("No project: pass --project <id> or run inside a thread.");
-    let hostId = explicit.machine ? await resolveHostId(explicit.machine) : null;
-    const environmentId = explicit.environment ?? (hostId ? null : inheritedEnvironmentId(caller, projectId));
-    if (!environmentId && !hostId) {
-      const sources = await bb.sdk.projects.get({ projectId }).then((p) => p.sources ?? [], () => []);
-      hostId = defaultHostId(caller?.hostId ?? null, sources);
-    }
-    return { projectId, environmentId, hostId };
-  }
-
-  /** A machine selector is an exact host ID or an exact, unique machine name. */
-  async function resolveHostId(selector: string): Promise<string> {
-    const hosts = await bb.sdk.hosts.list();
-    const byId = hosts.find((h) => h.id === selector);
-    if (byId) return byId.id;
-    const byName = hosts.filter((h) => h.name === selector);
-    if (byName.length === 1) return byName[0]!.id;
-    const known = hosts.map((h) => `${h.name} (${h.id})`).join(", ");
-    throw new Error(byName.length ? `Machine name "${selector}" is ambiguous; use its ID: ${known}` : `No machine "${selector}". Machines: ${known}`);
+    return projectId;
   }
 
   // ------------------------------------------------------------------ RPC
@@ -1136,14 +1121,15 @@ export default async function plugin(bb: BbPluginApi) {
     roles_update: ({ id, ...patch }) => updateRole(id, patch),
     roles_delete: ({ id }) => { if (!deleteRole(id)) throw new Error(`No role with id ${id}`); return { ok: true as const }; },
     roles_reorder: ({ ids }) => { reorderRoles(ids); publishRoles(); return { ok: true as const }; },
-    role_spawn: async (input) => ({ threadId: await spawnRole(input) }),
+    role_spawn: async ({ environmentId, hostId, callerThreadId, ...rest }) =>
+      ({ threadId: await spawnRole({ ...rest, placement: placementOf({ environmentId, hostId, callerThreadId }) }) }),
     teams_list: () => ({ teams: listTeams() }),
     teams_create: (input) => createTeam(input),
     teams_update: ({ id, ...patch }) => updateTeam(id, patch),
     teams_delete: ({ id }) => { if (!deleteTeam(id)) throw new Error(`No team with id ${id}`); return { ok: true as const }; },
     runs_list: (input) => ({ runs: (runStmts.list.all(input?.limit ?? 50) as RunRow[]).map(toRun) }),
     runs_get: ({ id }) => { const r = getRun(id); if (!r) throw new Error(`No run with id ${id}`); return r; },
-    runs_start: (input) => startRun(input),
+    runs_start: ({ hostId, callerThreadId, ...rest }) => startRun({ ...rest, placement: placementOf({ environmentId: rest.environmentId, hostId, callerThreadId }) }),
     runs_cancel: ({ id }) => { cancelRun(id); return { ok: true as const }; },
     runs_delete: ({ id }) => {
       if (controllers.has(id)) throw new Error("Cancel the run before deleting it");
@@ -1157,7 +1143,8 @@ export default async function plugin(bb: BbPluginApi) {
       return { projects: list.map((p) => ({ id: p.id, name: p.name })) };
     },
     role_task_create: ({ roleSlug, prompt, project }) => createRoleTask(roleSlug, prompt, project),
-    role_chat: async (input) => ({ threadId: await chatRoleTask(input) }),
+    role_chat: async ({ environmentId, hostId, callerThreadId, ...rest }) =>
+      ({ threadId: await chatRoleTask({ ...rest, placement: placementOf({ environmentId, hostId, callerThreadId }) }) }),
     role_tasks_list: () => listRoleTasks(),
     thread_role: async ({ threadId }) => {
       let slug: string | null = roleThread(threadId)?.role_slug ?? null;
@@ -1208,15 +1195,16 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb role chat <TASK-KEY> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--wait]  open a thread for a role job",
     "  bb role tasks [--json]                        open role jobs",
     "  bb role teams [--json]                        team templates",
-    "  bb role run <team> --task <text> [--parent-self] [--project <id>] [--environment <id>] [--hidden] [--wait]",
+    "  bb role run <team> --task <text> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--hidden] [--wait]",
     "  bb role runs [--json]                         recent team runs",
     "  bb role status <runId> [--json]               run progress, per-step threads and outputs",
     "  bb role cancel <runId>",
     "  bb role sync [--json]                         reconcile roles ↔ ~/.claude/agents ↔ Tasks presets now",
     "  bb role sync --status [--json]                last sync report",
     "",
-    "Without --machine or --environment, a role thread reuses the calling thread's environment within its own project;",
-    "otherwise it runs on the caller's machine if the project has a checkout there, else on the project's only checkout.",
+    "Without --machine or --environment, a role thread (and every team-run step) reuses the calling thread's environment",
+    "within its own project; otherwise it runs on the caller's machine if the project has a checkout there, else on the",
+    "project's only checkout. The Agent roles page follows the same rule.",
     "",
     "Roles can also be created and edited on the Agent roles page (sidebar); teams only there.",
   ].join("\n");
@@ -1249,7 +1237,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "chat", summary: "Open a thread for a role job", usage: "bb role chat <TASK-KEY> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--wait]" },
       { name: "tasks", summary: "List open role jobs", usage: "bb role tasks [--json]" },
       { name: "teams", summary: "List team templates", usage: "bb role teams [--json]" },
-      { name: "run", summary: "Run a team on a task", usage: "bb role run <team> --task <text> [--parent-self] [--project <id>] [--environment <id>] [--hidden] [--wait]" },
+      { name: "run", summary: "Run a team on a task", usage: "bb role run <team> --task <text> [--parent-self] [--project <id>] [--machine <id-or-name> | --environment <id>] [--hidden] [--wait]" },
       { name: "runs", summary: "List recent team runs", usage: "bb role runs [--json]" },
       { name: "status", summary: "Show a team run", usage: "bb role status <runId> [--json]" },
       { name: "cancel", summary: "Cancel a team run", usage: "bb role cancel <runId>" },
@@ -1263,7 +1251,7 @@ export default async function plugin(bb: BbPluginApi) {
       const reply = (value: unknown, text: string) => ({ exitCode: 0, stdout: json ? JSON.stringify(value, null, 2) : text });
       const fail = (message: string) => ({ exitCode: 1, stderr: message });
       const parentFor = () => (flags.has("parent-self") ? ctx.threadId ?? null : str(flags.get("parent")) ?? null);
-      const targetFor = () => ({ project: str(flags.get("project")), environment: str(flags.get("environment")), machine: str(flags.get("machine")) });
+      const placementFor = (): PlacementRequest => ({ callerThreadId: ctx.threadId ?? null, environmentId: str(flags.get("environment")) ?? null, machine: str(flags.get("machine")) ?? null });
       /** Role fields named by flags. "inherit" clears provider, model, reasoning or permission. */
       const roleFieldsFrom = async (): Promise<Record<string, unknown>> => {
         const fields: Record<string, unknown> = {};
@@ -1339,8 +1327,8 @@ export default async function plugin(bb: BbPluginApi) {
               const task = await createRoleTask(role.slug, prompt, str(flags.get("tasks-project")) ?? null);
               return reply(task, `Filed ${task.key} for ${role.name}. Open a chat with: bb role chat ${task.key}\n::task{key="${task.key}"}`);
             }
-            const { projectId, environmentId, hostId } = await contextFor(ctx, targetFor());
-            const threadId = await spawnRole({ roleSlug: role.slug, prompt, projectId, environmentId, hostId, parentThreadId: parentFor(), title: str(flags.get("title")), hidden: flags.has("hidden"), taskKey: str(flags.get("task")) ?? null });
+            const projectId = await projectFor(ctx, str(flags.get("project")));
+            const threadId = await spawnRole({ roleSlug: role.slug, prompt, projectId, placement: placementFor(), parentThreadId: parentFor(), title: str(flags.get("title")), hidden: flags.has("hidden"), taskKey: str(flags.get("task")) ?? null });
             if (flags.has("wait")) {
               const { stepTimeoutMinutes } = await settings.get();
               const output = await awaitThread(threadId, signal, Math.max(1, Number(stepTimeoutMinutes) || 45) * 60_000);
@@ -1350,8 +1338,8 @@ export default async function plugin(bb: BbPluginApi) {
           }
           case "chat": {
             if (!rest[0]) return fail("Task key is required, e.g. bb role chat TEST-3");
-            const { projectId, environmentId, hostId } = await contextFor(ctx, targetFor());
-            const threadId = await chatRoleTask({ taskKey: rest[0], projectId, environmentId, hostId, parentThreadId: parentFor() });
+            const projectId = await projectFor(ctx, str(flags.get("project")));
+            const threadId = await chatRoleTask({ taskKey: rest[0], projectId, placement: placementFor(), parentThreadId: parentFor() });
             if (flags.has("wait")) {
               const { stepTimeoutMinutes } = await settings.get();
               const output = await awaitThread(threadId, signal, Math.max(1, Number(stepTimeoutMinutes) || 45) * 60_000);
@@ -1372,9 +1360,9 @@ export default async function plugin(bb: BbPluginApi) {
             if (!team) return fail(`No team "${rest[0] ?? ""}". Run "bb role teams".`);
             const task = str(flags.get("task"));
             if (!task) return fail("--task is required");
-            if (flags.has("machine")) return fail("bb role run doesn't take --machine yet; pass --environment <id> to run every step in one environment.");
-            const { projectId, environmentId } = await contextFor(ctx, targetFor());
-            const run = startRun({ teamSlug: team.slug, task, projectId, environmentId, parentThreadId: parentFor(), hidden: flags.has("hidden") });
+            const projectId = await projectFor(ctx, str(flags.get("project")));
+            const placement = placementFor();
+            const run = await startRun({ teamSlug: team.slug, task, projectId, environmentId: placement.environmentId ?? null, placement, parentThreadId: parentFor(), hidden: flags.has("hidden") });
             if (flags.has("wait")) {
               while (!signal.aborted) {
                 const current = getRun(run.id)!;
