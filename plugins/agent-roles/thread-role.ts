@@ -2,10 +2,9 @@
 // receives. Every reader goes through this module: bb.agents.configure (the
 // injected instructions), the thread_role RPC (the header badge), the job
 // report on thread.idle and the CLI's warning about cut-off instructions.
-// Role Picker imports the metadata half, so both plugins write and read
-// this plugin's thread metadata the same way.
-//
-// No imports: Role Picker bundles this file from its sibling directory.
+// Role Picker keeps a copy of the metadata half (plugins/role-picker/
+// role-metadata.ts; bb builds each plugin from its own folder only), and its
+// role-metadata.test.ts fails if the copy drifts from this file.
 
 /** This plugin's thread metadata, as spawnRole seeds it and Role Picker sets it. */
 export type RoleMetadata = {

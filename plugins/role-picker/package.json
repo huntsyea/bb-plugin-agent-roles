@@ -78,7 +78,7 @@
   ],
   "scripts": {
     "build": "bb plugin build",
-    "check": "tsc --noEmit && bb plugin types --check",
-    "test": "node --experimental-strip-types --test server.test.ts"
+    "check": "tsc --noEmit && bb plugin types --check && node ../../scripts/check-plugin-imports.mjs",
+    "test": "node --experimental-strip-types --test role-metadata.test.ts server.test.ts"
   }
 }

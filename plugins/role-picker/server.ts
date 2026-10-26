@@ -1,8 +1,8 @@
 import { defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { presets } from './presets.ts';
-// Fork (BBP-60): Agent Roles owns its thread metadata; read and write it through its module.
-import { metadataRoleSlug, roleMetadata } from '../agent-roles/thread-role.ts';
+// Fork (BBP-60): Agent Roles' thread metadata format, copied in role-metadata.ts.
+import { metadataRoleSlug, roleMetadata } from './role-metadata.ts';
 const role = z.object({ id: z.string(), slug: z.string(), name: z.string(), description: z.string(), instructions: z.string(), color: z.string() });
 const rolesOutput = z.object({ roles: z.array(role) });
 const metadata = z.object({ roleId: z.string(), roleSlug: z.string(), roleName: z.string(), roleColor: z.string() });
