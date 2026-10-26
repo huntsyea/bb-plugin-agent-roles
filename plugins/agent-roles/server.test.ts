@@ -6,12 +6,13 @@ import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 // Resolve the backend's bundler imports when running source with Node.
 registerHooks({ resolve(specifier, context, nextResolve) {
   if (context.parentURL?.startsWith(import.meta.url.slice(0, import.meta.url.lastIndexOf('/') + 1)) &&
-      ['./shared', './sync', './placement'].includes(specifier)) {
+      /^\.\/[\w-]+$/.test(specifier)) {
     return nextResolve(`${specifier}.ts`, context);
   }
   return nextResolve(specifier, context);
 } });
-const { default: plugin } = await import('./server.ts');
+const { default: plugin, agentRoles } = await import('./server.ts');
+const { memoryTasks } = await import('./memory-tasks.ts');
 const { parseAgentFile, serializeAgentFile } = await import('./sync.ts');
 
 const roleInput = {
@@ -172,5 +173,24 @@ test('bb role spawn --thread places the role thread by the one rule', async () =
     assert.deepEqual(await spawn({ threadId: 'caller-same' }, '--machine', 'host_g5'), onHost('host_g5'));
     assert.match(await spawn({ threadId: 'caller-same' }, '--machine', 'g5'), /ambiguous/);
     assert.match(await spawn({ threadId: 'caller-same' }, '--machine', 'mac', '--environment', 'env_x'), /not both/);
+  } finally { await host.harness.dispose(); }
+});
+
+test('opening a role job from the page places its thread by the same rule', async () => {
+  const { host, spawns } = placementHost();
+  const tasks = memoryTasks();
+  try {
+    await agentRoles(host.bb, { tasksRunner: tasks.run });
+    const job: any = await host.harness.callRpc('role_task_create', { roleSlug: 'reviewer', prompt: 'Review the diff', project: 'AG' });
+    const { threadId }: any = await host.harness.callRpc('role_chat', { taskKey: job.key, projectId: 'proj_mini', callerThreadId: 'caller-g5', parentThreadId: null });
+    assert.deepEqual(spawns.at(-1)!.environment, MINI_ONLY);
+    assert.deepEqual(tasks.attached.get(job.key), [threadId]);
+    const listed: any = await host.harness.callRpc('role_tasks_list', null);
+    assert.deepEqual(listed.tasks.map((t: any) => [t.key, t.threadIds]), [[job.key, [threadId]]]);
+    const cli = await host.harness.runCli(['chat', job.key, '--machine', 'mac'], { threadId: 'caller-same' });
+    assert.equal(cli.exitCode, 0, cli.stderr);
+    assert.deepEqual(spawns.at(-1)!.environment, onHost('host_mac'));
+    await host.harness.emitThreadEvent('thread.idle', { thread: { id: threadId }, lastAssistantText: 'Looks good.' } as any);
+    assert.deepEqual(tasks.comments, [{ key: job.key, body: `**Reviewer** (thread ${threadId}):\n\nLooks good.` }]);
   } finally { await host.harness.dispose(); }
 });

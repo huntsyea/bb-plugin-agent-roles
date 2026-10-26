@@ -81,6 +81,6 @@
   "scripts": {
     "build": "bb plugin build",
     "check": "tsc --noEmit && bb plugin types --check",
-    "test": "node --experimental-strip-types --test shared.test.ts server.test.ts"
+    "test": "node --experimental-strip-types --test shared.test.ts role-jobs.test.ts server.test.ts"
   }
 }

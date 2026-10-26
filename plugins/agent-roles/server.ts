@@ -27,18 +27,16 @@ import {
   type RoleColor,
 } from "./shared";
 import {
-  ROLE_LABEL_PREFIX,
-  makeBbTasksRunner,
-  makeTaskOps,
   makeTasksCli,
   resolveAgentsDir,
   runSync,
   type Canon,
   type SyncReport,
   type SyncState,
-  type TaskRecord,
 } from "./sync";
 import { makePlacement, type PlacementRequest } from "./placement";
+import { makeRoleJobs } from "./role-jobs";
+import { makeBbTasksRunner, type BbTasksRunner } from "./tasks-cli";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -391,6 +389,11 @@ const SEED_TEAMS: z.input<typeof teamInputSchema>[] = [
 // ---------------------------------------------------------------------------
 
 export default async function plugin(bb: BbPluginApi) {
+  return agentRoles(bb);
+}
+
+/** The plugin, with the Tasks runner replaceable for tests (tasks-cli.ts is the production adapter). */
+export async function agentRoles(bb: BbPluginApi, options: { tasksRunner?: BbTasksRunner } = {}) {
   bb.log.info("loaded");
 
   const settings = bb.settings.define({
@@ -691,7 +694,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       const s = await settings.get();
       if (!s.syncEnabled) return { at: Date.now(), actions: [], problems: [], agentsDir: "" };
-      const tasks = makeTasksCli(makeBbTasksRunner({ serverUrl: () => bb.server.loopbackBaseUrl, bbBinary: String(s.bbBinary ?? "") }));
+      const tasks = makeTasksCli(tasksRunner);
       const report = await runSync({
         agentsDir: resolveAgentsDir(String(s.agentsDir ?? "")),
         defaults: {
@@ -767,6 +770,7 @@ export default async function plugin(bb: BbPluginApi) {
     insert: db.prepare(`INSERT OR REPLACE INTO role_threads (thread_id, role_slug, task_key, last_report_hash, created_at) VALUES (?, ?, ?, NULL, ?)`),
     get: db.prepare(`SELECT * FROM role_threads WHERE thread_id = ?`),
     setReport: db.prepare(`UPDATE role_threads SET last_report_hash = ? WHERE thread_id = ?`),
+    forTask: db.prepare(`SELECT thread_id FROM role_threads WHERE task_key = ? ORDER BY created_at, rowid`),
   };
   interface RoleThreadRow { thread_id: string; role_slug: string; task_key: string | null; last_report_hash: string | null; created_at: number }
   const roleThread = (threadId: string) => threadStmts.get.get(threadId) as RoleThreadRow | undefined;
@@ -824,84 +828,27 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   // ------------------------------------------------------------------ role jobs in Tasks
-  const tasksRunner = async () => makeBbTasksRunner({ serverUrl: () => bb.server.loopbackBaseUrl, bbBinary: String((await settings.get()).bbBinary ?? "") });
-  const taskOps = async () => makeTaskOps(await tasksRunner());
+  const tasksRunner: BbTasksRunner = options.tasksRunner ?? (async (args) =>
+    makeBbTasksRunner({ serverUrl: () => bb.server.loopbackBaseUrl, bbBinary: String((await settings.get()).bbBinary ?? "") })(args));
+  const roleJobs = makeRoleJobs({
+    run: tasksRunner,
+    configuredProject: async () => String((await settings.get()).tasksProject ?? ""),
+    roles: { find: findRole, list: listRoles },
+    spawn: spawnRole,
+    threads: {
+      get: (threadId) => {
+        const row = roleThread(threadId);
+        return row ? { roleSlug: row.role_slug, taskKey: row.task_key, lastReportHash: row.last_report_hash } : null;
+      },
+      forTask: (taskKey) => (threadStmts.forTask.all(taskKey) as Array<{ thread_id: string }>).map((r) => r.thread_id),
+      setReportHash: (threadId, hash) => { threadStmts.setReport.run(hash, threadId); },
+    },
+    log: bb.log,
+  });
 
-  async function resolveTasksProject(explicit: string | null): Promise<string> {
-    if (explicit) return explicit;
-    const configured = String((await settings.get()).tasksProject ?? "").trim();
-    if (configured) return configured;
-    const projects = await (await taskOps()).projects();
-    if (!projects.length) throw new Error("No Tasks project exists yet. Create one in Tasks or run: bb tasks project create");
-    return projects[0]!.prefix;
-  }
-
-  /** File the request as a Tasks record labelled with the role; no thread yet. */
-  async function createRoleTask(roleSlug: string, prompt: string, project: string | null): Promise<{ key: string; title: string }> {
-    const role = findRole(roleSlug);
-    if (!role) throw new Error(`No role "${roleSlug}". Run "bb role list".`);
-    const ops = await taskOps();
-    const proj = await resolveTasksProject(project);
-    const label = ROLE_LABEL_PREFIX + role.slug;
-    await ops.ensureLabel(proj, label);
-    const firstLine = prompt.split("\n").find((l) => l.trim())?.trim() ?? prompt;
-    const title = `[${role.name}] ${firstLine.slice(0, 100)}`;
-    const task = await ops.create({ project: proj, title, description: prompt, labels: [label] });
-    return { key: task.key, title: task.title };
-  }
-
-  const roleSlugOfTask = (labels: Array<{ name: string }>) =>
-    labels.map((l) => l.name).find((n) => n.startsWith(ROLE_LABEL_PREFIX))?.slice(ROLE_LABEL_PREFIX.length) ?? null;
-
-  /** Open a thread for a task's role, attach it and mark the task in progress. */
-  async function chatRoleTask(input: { taskKey: string; projectId: string; placement: PlacementRequest; parentThreadId: string | null }): Promise<string> {
-    const ops = await taskOps();
-    const detail = await ops.show(input.taskKey);
-    const slug = roleSlugOfTask(detail.labels ?? []);
-    if (!slug) throw new Error(`Task ${input.taskKey} has no role label (${ROLE_LABEL_PREFIX}<slug>).`);
-    const prompt = detail.task.description?.trim() || detail.task.title;
-    const threadId = await spawnRole({ roleSlug: slug, prompt, projectId: input.projectId, placement: input.placement, parentThreadId: input.parentThreadId, hidden: false, taskKey: detail.task.key });
-    try { await ops.attach(detail.task.key, threadId); } catch (cause) { bb.log.warn(`attach ${detail.task.key}: ${cause instanceof Error ? cause.message : String(cause)}`); }
-    if (detail.task.status === "backlog" || detail.task.status === "todo") {
-      try { await ops.setStatus(detail.task.key, "in_progress"); } catch { /* status is cosmetic */ }
-    }
-    return threadId;
-  }
-
-  async function listRoleTasks(): Promise<{ tasks: RoleTask[]; project: string | null }> {
-    const ops = await taskOps();
-    let project: string | null = null;
-    try { project = await resolveTasksProject(null); } catch { return { tasks: [], project: null }; }
-    const labels = new Set(listRoles().map((r) => ROLE_LABEL_PREFIX + r.slug));
-    const rows: TaskRecord[] = await ops.list({ project, statuses: ["backlog", "todo", "in_progress", "in_review"], limit: 200 });
-    const detailed = await Promise.all(rows.map(async (t) => {
-      const d = await ops.show(t.key).catch(() => null);
-      const slug = d ? roleSlugOfTask(d.labels ?? []) : null;
-      if (!slug || !labels.has(ROLE_LABEL_PREFIX + slug)) return null;
-      return roleTaskSchema.parse({
-        key: t.key, title: t.title, description: t.description ?? "", status: t.status, priority: t.priority, roleSlug: slug,
-        updatedAt: t.updatedAt, threadIds: (d?.taskThreads ?? []).map((x) => x.threadId),
-      });
-    }));
-    return { tasks: detailed.filter((t): t is RoleTask => t !== null), project };
-  }
-
-  // When a role thread goes idle, its answer lands on the task as one comment.
+  // When a role thread goes idle, its answer lands on its job as one comment.
   bb.events.on("thread.idle", async ({ thread, lastAssistantText }) => {
-    const row = roleThread(thread.id);
-    if (!row?.task_key || !lastAssistantText?.trim()) return;
-    const text = lastAssistantText.replace(/^::agent-role\{[^}]*\}\s*$/m, "").trim();
-    if (!text) return;
-    const hash = String(text.length) + ":" + text.slice(0, 64);
-    if (row.last_report_hash === hash) return;
-    try {
-      const ops = await taskOps();
-      const body = text.length > 6000 ? text.slice(0, 6000) + "\n\n[…truncated; full answer in the thread]" : text;
-      await ops.comment(row.task_key, `**${roleBySlug(row.role_slug)?.name ?? row.role_slug}** (thread ${thread.id}):\n\n${body}`);
-      threadStmts.setReport.run(hash, thread.id);
-    } catch (cause) {
-      bb.log.warn(`report to ${row.task_key}: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }
+    if (lastAssistantText) await roleJobs.report(thread.id, lastAssistantText);
   });
 
   // ------------------------------------------------------------------ team runs
@@ -1142,10 +1089,10 @@ export default async function plugin(bb: BbPluginApi) {
       const list = (Array.isArray(result) ? result : (result as { projects?: unknown[] }).projects ?? []) as Array<{ id: string; name: string }>;
       return { projects: list.map((p) => ({ id: p.id, name: p.name })) };
     },
-    role_task_create: ({ roleSlug, prompt, project }) => createRoleTask(roleSlug, prompt, project),
+    role_task_create: ({ roleSlug, prompt, project }) => roleJobs.file(roleSlug, prompt, project),
     role_chat: async ({ environmentId, hostId, callerThreadId, ...rest }) =>
-      ({ threadId: await chatRoleTask({ ...rest, placement: placementOf({ environmentId, hostId, callerThreadId }) }) }),
-    role_tasks_list: () => listRoleTasks(),
+      ({ threadId: await roleJobs.open({ ...rest, placement: placementOf({ environmentId, hostId, callerThreadId }) }) }),
+    role_tasks_list: () => roleJobs.list(),
     thread_role: async ({ threadId }) => {
       let slug: string | null = roleThread(threadId)?.role_slug ?? null;
       let taskKey: string | null = roleThread(threadId)?.task_key ?? null;
@@ -1324,7 +1271,7 @@ export default async function plugin(bb: BbPluginApi) {
             const prompt = str(flags.get("prompt"));
             if (!prompt) return fail("--prompt is required");
             if (!flags.has("thread")) {
-              const task = await createRoleTask(role.slug, prompt, str(flags.get("tasks-project")) ?? null);
+              const task = await roleJobs.file(role.slug, prompt, str(flags.get("tasks-project")) ?? null);
               return reply(task, `Filed ${task.key} for ${role.name}. Open a chat with: bb role chat ${task.key}\n::task{key="${task.key}"}`);
             }
             const projectId = await projectFor(ctx, str(flags.get("project")));
@@ -1339,7 +1286,7 @@ export default async function plugin(bb: BbPluginApi) {
           case "chat": {
             if (!rest[0]) return fail("Task key is required, e.g. bb role chat TEST-3");
             const projectId = await projectFor(ctx, str(flags.get("project")));
-            const threadId = await chatRoleTask({ taskKey: rest[0], projectId, placement: placementFor(), parentThreadId: parentFor() });
+            const threadId = await roleJobs.open({ taskKey: rest[0], projectId, placement: placementFor(), parentThreadId: parentFor() });
             if (flags.has("wait")) {
               const { stepTimeoutMinutes } = await settings.get();
               const output = await awaitThread(threadId, signal, Math.max(1, Number(stepTimeoutMinutes) || 45) * 60_000);
@@ -1348,7 +1295,7 @@ export default async function plugin(bb: BbPluginApi) {
             return reply({ threadId }, `Opened thread ${threadId} for ${rest[0]}. Wait with: bb thread wait ${threadId}`);
           }
           case "tasks": {
-            const { tasks, project } = await listRoleTasks();
+            const { tasks, project } = await roleJobs.list();
             return reply(tasks, tasks.map((t) => `${t.key.padEnd(10)} ${t.status.padEnd(12)} ${(t.roleSlug ?? "").padEnd(12)} ${t.threadIds.length ? t.threadIds.length + " thread(s)  " : ""}${t.title}`).join("\n") || `No open role jobs${project ? ` in ${project}` : ""}.`);
           }
           case "teams": {

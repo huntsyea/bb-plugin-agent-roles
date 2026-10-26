@@ -9,12 +9,12 @@
 // kept in `sync_state`) tells which side changed since the previous sync,
 // and that side wins. Deleting a role in the UI or deleting the file removes
 // the other two; a deleted preset is recreated (it is derived).
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, promises as fs, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PERMISSION_MODES, REASONING_VALUE_RE, ROLE_COLORS, SLUG_RE, type RoleColor } from "./shared";
+import type { BbTasksRunner } from "./tasks-cli";
 
 // ---------------------------------------------------------------------------
 // Canonical record shared by the three sides
@@ -229,34 +229,6 @@ export interface TasksCli {
   remove(id: string): Promise<void>;
 }
 
-function findBbBinary(override: string): string {
-  const candidates = [override.trim(), process.env.BB_CLI ?? "", "/Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"].filter(Boolean);
-  for (const c of candidates) if (existsSync(c)) return c;
-  return "bb";
-}
-
-/** Runs `bb tasks <args> --json` against this server and returns the parsed JSON. */
-export type BbTasksRunner = (args: string[]) => Promise<Record<string, unknown>>;
-
-export function makeBbTasksRunner(opts: { serverUrl: () => string; bbBinary: string }): BbTasksRunner {
-  return (args) =>
-    new Promise((resolve, reject) => {
-      let url = "";
-      try { url = opts.serverUrl(); } catch { /* not listening yet */ }
-      execFile(
-        findBbBinary(opts.bbBinary),
-        ["tasks", ...args, "--json"],
-        { env: { ...process.env, ...(url ? { BB_SERVER_URL: url } : {}) }, maxBuffer: 8 * 1024 * 1024, timeout: 30_000 },
-        (err, stdout, stderr) => {
-          if (err) return reject(new Error(`bb tasks ${args.slice(0, 2).join(" ")}: ${stderr.trim() || err.message}`));
-          const text = String(stdout);
-          const at = text.indexOf("{");
-          try { resolve(JSON.parse(at >= 0 ? text.slice(at) : text)); } catch { resolve({}); }
-        },
-      );
-    });
-}
-
 export function makeTasksCli(run: BbTasksRunner): TasksCli {
   const flags = (p: Partial<Omit<Preset, "id">>) => [
     ...(p.name !== undefined ? ["--name", p.name] : []),
@@ -273,62 +245,6 @@ export function makeTasksCli(run: BbTasksRunner): TasksCli {
     remove: async (id) => { await run(["preset", "delete", id]); },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Tasks records (the lightweight "job" a role spawn creates)
-// ---------------------------------------------------------------------------
-
-export interface TasksProject { id: string; name: string; prefix: string; linkedBbProjectId: string | null }
-export interface TaskRecord {
-  id: string; key: string; title: string; description: string; status: string; priority: string;
-  projectId: string; labelIds: string[]; createdAt: string; updatedAt: string;
-}
-export interface TaskDetail {
-  task: TaskRecord;
-  project: TasksProject;
-  labels: Array<{ id: string; name: string }>;
-  taskThreads: Array<{ threadId: string; title?: string; liveStatus?: string; presetName?: string }>;
-}
-
-export const ROLE_LABEL_PREFIX = "role:";
-
-export function makeTaskOps(run: BbTasksRunner) {
-  const labelCache = new Map<string, Set<string>>();
-  const ops = {
-    projects: async (): Promise<TasksProject[]> => ((await run(["project", "list"])).projects as TasksProject[] | undefined) ?? [],
-    /** Create the `role:<slug>` label once per project. */
-    ensureLabel: async (project: string, name: string): Promise<void> => {
-      let known = labelCache.get(project);
-      if (!known) {
-        const labels = ((await run(["label", "list", "--project", project])).labels as Array<{ name: string }> | undefined) ?? [];
-        known = new Set(labels.map((l) => l.name.toLowerCase()));
-        labelCache.set(project, known);
-      }
-      if (known.has(name.toLowerCase())) return;
-      await run(["label", "create", "--project", project, "--name", name]);
-      known.add(name.toLowerCase());
-    },
-    create: async (input: { project: string; title: string; description: string; labels: string[] }): Promise<TaskRecord> => {
-      const args = ["create", "--project", input.project, "--title", input.title, "--description", input.description];
-      for (const l of input.labels) args.push("--label", l);
-      return (await run(args)).task as TaskRecord;
-    },
-    show: async (key: string): Promise<TaskDetail> => (await run(["show", key])) as unknown as TaskDetail,
-    list: async (input: { project?: string; label?: string; statuses?: string[]; limit?: number }): Promise<TaskRecord[]> => {
-      const args = ["list"];
-      if (input.project) args.push("--project", input.project);
-      if (input.label) args.push("--label", input.label);
-      for (const st of input.statuses ?? []) args.push("--status", st);
-      args.push("--limit", String(input.limit ?? 100));
-      return ((await run(args)).tasks as TaskRecord[] | undefined) ?? [];
-    },
-    attach: async (key: string, threadId: string): Promise<void> => { await run(["attach", key, "--thread", threadId]); },
-    setStatus: async (key: string, status: string): Promise<void> => { await run(["update", key, "--status", status]); },
-    comment: async (key: string, body: string): Promise<void> => { await run(["comment", key, "--body", body]); },
-  };
-  return ops;
-}
-export type TaskOps = ReturnType<typeof makeTaskOps>;
 
 export const presetToCanon = (p: Preset, base: Canon | null, d: SyncDefaults, slug: string): Canon => ({
   slug,
